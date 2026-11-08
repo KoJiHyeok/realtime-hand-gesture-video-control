@@ -1,3 +1,2 @@
-mediapipe
-pynput
-opencv-python
+mediapipe==1.2.2
+uiautomation==2.0.29

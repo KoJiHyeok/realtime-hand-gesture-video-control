@@ -1,33 +1,36 @@
 # 실시간 손 제스처 인식 기반 동영상 제어 시스템
 
-Real-Time Hand Gesture Recognition-Based Video Control System
+웹캠으로 손 제스처를 인식해 유튜브를 제어합니다. Windows 전용입니다.
 
-웹캠으로 손 제스처를 인식해 유튜브를 조작합니다.
+## 설치
 
-## 설치 (Windows)
-```
-git clone https://github.com/KoJiHyeok/realtime-hand-gesture-video-control.git
-cd realtime-hand-gesture-video-control
-python -m venv .venv
-.venv\Scripts\python -m pip install -r requirements.txt
-mkdir models
-curl.exe -o models\gesture_recognizer.task https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/1/gesture_recognizer.task
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe download_model.py
 ```
 
 ## 실행
+
+유튜브 영상을 연 상태에서 실행합니다.
+
+```powershell
+.\.venv\Scripts\python.exe run.py         # 유튜브 제어
+.\.venv\Scripts\python.exe run.py --test  # 키 없이 인식만 확인
 ```
-.venv\Scripts\python main.py --test   # 키 없이 인식만 확인
-.venv\Scripts\python main.py          # 실제 조작
-```
-실제 조작은 유튜브 영상을 클릭해 둔 뒤 영문 입력 상태에서 합니다. 종료는 터미널에서 Ctrl+C.
+
+끝내기: 웹캠 창에서 `q` 또는 `ESC`
 
 ## 제스처
-| 동작 | 결과 |
-|---|---|
-| 양손 손바닥 1초 | 시작 |
-| 양손 주먹 1초 | 종료 |
-| 한 손 OK | 재생/정지 |
-| 한 손 오른쪽 쓸기 | +10초 |
-| 한 손 왼쪽 쓸기 | -10초 |
 
-값 조절은 `config.py`, 코드 설명은 `study.html`을 보세요.
+| 동작 | 기능 |
+|---|---|
+| 한 손 브이 1초 유지 | 인식 시작 / 종료 |
+| 한 손 OK 사인 | 재생/일시정지 |
+| 손등이 보이게 왼손 총 모양 | 10초 앞으로 |
+| 손등이 보이게 오른손 총 모양 | 10초 뒤로 |
+| 손바닥이 보이게 검지를 위로 | 볼륨 증가 (유지하면 반복) |
+| 손바닥이 보이게 엄지를 아래로 | 볼륨 감소 (유지하면 반복) |
+
+총 모양은 엄지와 검지를 펴고 나머지를 접은 자세입니다. 브이·OK·총 모양은 손을 풀어야 다시 인식합니다.
+명령은 손이 하나만 보일 때 동작합니다. 값 조절은 `gesture_control/config.py`에서 합니다.
