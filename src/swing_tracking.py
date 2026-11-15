@@ -1,6 +1,6 @@
 """'가운데 -> 좌/우' 손목 스윙으로 SEEK 판정 + 반대 방향 3초/주먹 규칙.
 
-송준섭님 MotionTracker 를 상속한다 (쿨다운·위/아래 볼륨은 원래 코드).
+팀원 저장소의 MotionTracker 를 상속한다 (쿨다운·위/아래 볼륨은 원래 코드).
 
 손 방향 = 손목(0) -> 중지 뿌리(9) 벡터의 각도.
   0° = 화면 위, +90° = 화면 오른쪽, -90° = 화면 왼쪽.
@@ -19,6 +19,7 @@
 import csv
 import math
 import time
+from collections import deque
 from pathlib import Path
 
 from motion_tracking import MotionTracker
@@ -64,12 +65,15 @@ class SwingTracker(MotionTracker):
         dwell=0.0,            # 가운데에 이만큼(초) 머물러야 준비 완료. 0 = 가운데 프레임 1장이면 준비
         trigger_angle=40,     # 가운데에서 이 각도 이상 넘어가면 SEEK
         swing_time=0.7,       # 가운데를 떠난 뒤 이 시간(초) 안에 넘어가야 함 (천천히 기울이는 건 무시)
-        wrist_drift_max=1.5,  # 손목 이동이 손 크기(0->9 거리)의 이 배수 이하
+        wrist_drift_max=2.5,  # 손목 이동이 손 크기(0->9 거리)의 이 배수 이하 (잠긴 쪽에서 크게 넘겨 치면 2.0 까지 나옴)
         gap_max=0.4,          # 손을 이만큼(초) 이하로 놓친 건 같은 동작으로 이어 본다
+        open_ratio=0.5,       # 판정 직전 open_window 초 동안 '편 손' 프레임이 이 비율 이상이어야 SEEK
+        open_window=0.5,
         name="?",             # 진단 기록용 손 이름
         **kwargs
     ):
         kwargs.setdefault("horizontal_threshold", float("inf"))  # 손 전체 좌우 이동 SEEK 끄기
+        kwargs.setdefault("gap", gap_max)  # 볼륨 이동 기록도 짧은 공백은 이어서 본다
         super().__init__(**kwargs)
 
         self.center_zone = center_zone
@@ -78,9 +82,15 @@ class SwingTracker(MotionTracker):
         self.swing_time = swing_time
         self.wrist_drift_max = wrist_drift_max
         self.gap_max = gap_max
+        self.open_ratio = open_ratio
+        self.open_window = open_window
+        self.open_log = deque()  # (시각, 편 손 여부)
         self.name = name
 
         self.debug = ""  # 화면 표시용
+        self.pose = None         # 지금 인정하는 엄지 자세 ("UP"/"DOWN"/None)
+        self.thumb_seen = None   # (자세, 마지막으로 본 시각)
+        self.thumb_grace = 0.5   # 움직이는 중(블러) 자세를 놓쳐도 이만큼(초)은 유지로 본다. 손을 펴면 즉시 해제
         self.clear_swing()
 
     def clear_swing(self):
@@ -100,34 +110,72 @@ class SwingTracker(MotionTracker):
         self.clear_swing()
 
     def mark_missing(self):
+        # 이동 기록·스윙 상태 모두 유지한다 (움직이는 중 1~5프레임 놓치는 일이 흔함).
+        # 오래 놓친 경우는 update 에서 gap / gap_max 로 걸러진다.
         trace(self.name, "MISSING", self.state, "", self.arm, "", "", "", "", "", "", "")
-        super().mark_missing()  # 스윙 상태는 유지 (gap_max 로 판단)
 
-    def update(self, landmarks, allow_motion=True, blocked=()):
+    def update(self, landmarks, allow_motion=True, blocked=(), thumb=None, fist=False,
+               open_hand=False, info=""):
         """blocked: 지금 잠겨 있는 SEEK 명령들. 잠긴 방향은 아예 인식하지 않는다.
 
         잠긴 쪽으로 손이 가는 것은 '가운데에 있는 것'과 똑같이 취급한다(준비 구역).
         -> 잠긴 쪽으로 팔을 뺐다가 열린 쪽으로 치면 그대로 인식되고,
            잠긴 쪽 동작 자체는 판정·기록·쿨다운 어디에도 영향을 주지 않는다.
+
+        thumb: 이 프레임의 엄지 자세 ("UP"/"DOWN"/None).
+          엄지 위 + 손이 위로 이동 = VOLUME_UP, 엄지 아래 + 손이 아래로 이동 = VOLUME_DOWN.
+          자세와 이동 방향이 맞을 때만 볼륨이다 (되돌아오는 동작은 방향이 반대라 무시된다).
+        fist: 네 손가락이 접혀 있음. 이때는 SEEK 스윙을 판정하지 않는다
+          (따봉을 만드는 도중 손이 옆으로 누우면서 SEEK 로 잡히는 것 방지).
         """
         now = time.monotonic()
+
+        # 0) 엄지 자세 (잠깐 놓친 프레임은 thumb_grace 동안 유지로 본다)
+        if landmarks is not None:  # 진단: 매 프레임 자세 판정 근거
+            trace(self.name, "POSE", self.state, allow_motion, self.arm, "",
+                  f"{landmarks[0].x:.3f}", f"{landmarks[0].y:.3f}", "", "", "",
+                  f"{thumb}/{'fist' if fist else 'open' if open_hand else '-'} {info}")
+        if landmarks is not None:
+            self.open_log.append((now, bool(open_hand)))
+        while self.open_log and now - self.open_log[0][0] > self.open_window:
+            self.open_log.popleft()
+        if thumb is not None:
+            self.thumb_seen = (thumb, now)
+        elif open_hand:
+            self.thumb_seen = None  # 손을 폈으면 엄지 자세 끝
+        pose = (
+            self.thumb_seen[0]
+            if self.thumb_seen is not None and now - self.thumb_seen[1] <= self.thumb_grace
+            else None
+        )
+        if pose != self.pose:
+            self.clear_history()  # 자세가 바뀌면 이동 기록을 새로 시작 -> '자세를 한 채' 움직인 것만 남는다
+            self.pose = pose
 
         # 1) 원래 코드: 쿨다운 처리 + 위/아래 이동(볼륨)
         vertical = super().update(landmarks, allow_motion=allow_motion)
 
+        if pose is not None and landmarks is not None and allow_motion:
+            self.clear_swing()  # 엄지 자세 중에는 SEEK 스윙을 보지 않는다
+            self.debug = f"thumb {pose}"
+            wanted = "VOLUME_UP" if pose == "UP" else "VOLUME_DOWN"
+            if vertical is not None:
+                ok = vertical == wanted
+                trace(self.name, "VERTICAL" if ok else "VETO", self.state, allow_motion,
+                      self.arm, "", "", "", "", "", pose, vertical)
+                if ok:
+                    return vertical
+            return None
+
         if vertical is not None:
-            # 스윙하려고 가운데를 벗어나는 중이면 볼륨이 아니다 (손목 중심 '호' 때문에 높이가 출렁임)
-            swinging = (
-                self.arm == "ARMED"
-                and self.last_center is not None
-                and 0 < now - self.last_center <= self.swing_time
-            )
-            if not swinging:
-                trace(self.name, "VERTICAL", self.state, allow_motion, self.arm,
-                      "", "", "", "", "", "", vertical)
-                return vertical
+            # 엄지 자세가 아니면 위/아래 이동은 볼륨이 아니다
             trace(self.name, "VETO", self.state, allow_motion, self.arm,
                   "", "", "", "", "", "", vertical)
+
+        if fist and landmarks is not None and allow_motion:
+            self.clear_swing()
+            self.debug = "fist"
+            return None
 
         if landmarks is None or not allow_motion:
             self.debug = ""
@@ -192,7 +240,17 @@ class SwingTracker(MotionTracker):
                     # 잠긴 쪽에 손을 둔 채 잠금만 풀린 경우: 동작이 아니므로 다시 가운데부터
                     self.arm = "WAIT_CENTER"
                 elif abs(hand_angle) >= self.trigger_angle:
-                    if drift <= self.wrist_drift_max and not cooling:
+                    # SEEK 는 손을 편 채 치는 동작이다. 엄지 자세로 손을 좌우로 기울이면
+                    # 손가락 일부가 펴진 것으로 읽혀 스윙처럼 보이므로 '편 손'인지로 거른다.
+                    #  - 판정 프레임과 그 직전 프레임이 둘 다 편 손이거나
+                    #  - 최근 open_window 초의 편 손 비율이 open_ratio 이상
+                    # 비율만 보면 주먹/엄지 자세 직후의 스윙을 놓친다 (실측 11-15 15:24: 14회 놓침).
+                    flags = [o for _, o in self.open_log]
+                    opened = (
+                        (len(flags) >= 2 and flags[-1] and flags[-2])
+                        or sum(flags) / max(len(flags), 1) >= self.open_ratio
+                    )
+                    if drift <= self.wrist_drift_max and not cooling and opened:
                         result = SWING_TO_RIGHT if hand_angle > 0 else SWING_TO_LEFT
                     self.arm = "WAIT_CENTER"  # 판정했든 손목이 움직여 무효든 다시 가운데부터
 

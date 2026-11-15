@@ -10,12 +10,16 @@ from gesture_recognition import (
     GestureController,
     recognize_gesture,
     select_gesture,
-    is_fist
+    is_fist,
+    is_true_fist,
+    is_relaxed_open,
+    thumb_pose,
+    thumb_info
 )
-from swing_tracking import SwingTracker, SeekGate  # 가운데->좌/우 스윙 SEEK + 3초/주먹 규칙
+from swing_tracking import SwingTracker, SeekGate, trace  # 가운데->좌/우 스윙 SEEK + 3초/주먹 규칙
 
-# SEEK 두 개만 시험하는 동안 볼륨(위/아래 이동)을 끈다. 다시 켜려면 True.
-ENABLE_VOLUME = False
+# 볼륨 = 엄지 위(따봉) + 손 위로 이동 / 엄지 아래 + 손 아래로 이동. 끄려면 False.
+ENABLE_VOLUME = True
 SEEK_COMMANDS = ("SEEK_FORWARD", "SEEK_BACKWARD")
 
 
@@ -204,10 +208,19 @@ def main():
                         name = get_handedness(result, i)
                         static = recognize_gesture(hand, name)
 
+                        # 3D 랜드마크는 엄지 각도·돌출 거리에만 쓴다 (진짜 주먹 vs 엄지 자세 구분).
+                        # 네 손가락 접힘/편 손은 화면 좌표가 더 잘 잡혀서 그대로 둔다.
+                        world = result.hand_world_landmarks[i]
+
                         hand_data.append({
                             "name": name,
                             "landmarks": hand,
-                            "static": static
+                            "static": static,
+                            "thumb": thumb_pose(hand, world),  # "UP"/"DOWN"/None
+                            "fist": is_fist(hand),             # 네 손가락 접힘 (따봉도 포함)
+                            "true_fist": is_true_fist(hand, world),  # 엄지까지 접은 주먹
+                            "open": is_relaxed_open(hand),     # 편 손
+                            "info": thumb_info(hand, world)    # 진단 기록용
                         })
 
                         if name in trackers:
@@ -226,9 +239,11 @@ def main():
                 motion_sources = {}
 
                 # 주먹을 0.25초 쥐면: 방금 방향을 3초 막고 반대 방향을 푼다
-                fist_visible = any(is_fist(item["landmarks"]) for item in hand_data)
+                # 방향 전환은 엄지까지 접은 진짜 주먹만 인정한다 (따봉/엄지 아래는 제외)
+                fist_visible = any(item["true_fist"] for item in hand_data)
                 if controller.enabled and gate.update_fist(fist_visible):
                     print(f"FIST: now only {gate.last_seek}")
+                    trace("gate", "FIST", "", "", "", "", "", "", "", "", "", gate.last_seek)
                     command_log.append(
                         (time.monotonic() - start_time, f"FIST > {gate.last_seek[5:]} only")
                     )
@@ -251,7 +266,11 @@ def main():
                         item["landmarks"],
                         allow_motion=allow_motion,
                         # 잠긴 방향은 판정기에서 아예 인식하지 않는다
-                        blocked=[c for c in SEEK_COMMANDS if not gate.allows(c)]
+                        blocked=[c for c in SEEK_COMMANDS if not gate.allows(c)],
+                        thumb=item["thumb"] if ENABLE_VOLUME else None,
+                        fist=item["fist"],
+                        open_hand=item["open"],
+                        info=item["info"]
                     )
 
                     if motion is not None:
